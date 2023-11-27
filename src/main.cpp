@@ -9,35 +9,44 @@
 void colorWipe(uint32_t color, int wait);
 void button_ISR();
 void updateFrame(uint8_t *message, uint8_t len, uint8_t row, uint32_t col);
-// void printNumber(uint8_t *message, uint8_t len, uint8_t row, uint32_t col);
+int16_t getAmbientLight();
 
 /////////////
 // DEFINES //
 /////////////
+// Code
 #define _ENABLE_SERIAL_
 #define _ENABLE_LEDS_
 #define _ENABLE_DS3231_
 #define _ENABLE_INTERRUPTS_
-
+// Hardware
+#define BUTTON_PIN 2
+#define LED_PIN 12                    // Which pin on the Arduino is connected to the NeoPixels?
+#define LIGHT_SENSOR_PIN A7
+// Application settings
 #define FALSE 0
 #define TRUE 1
 #define SERIAL_SPEED      115200
-#define REFRESH_TIME_STD  1000 // Refresh time for standard mode (Time\Temperature) [ms]
-#define REFRESH_TIME_FAST 200  // Fast refresh time for time setting mode [ms]
-#define MENU_TIME         5000 // [ms]
+#define REFRESH_TIME_STD  1000        // Refresh time for standard mode (Time\Temperature) [ms]
+#define REFRESH_TIME_FAST 200         // Fast refresh time for time setting mode [ms]
+#define MENU_TIME         5000        // [ms]
 #define MENU_TIME_STD     MENU_TIME/REFRESH_TIME_STD
 #define MENU_TIME_FAST    MENU_TIME/REFRESH_TIME_FAST
-#define BUTTON_PIN 2
-#define LED_PIN 12             // Which pin on the Arduino is connected to the NeoPixels?
-#define LED_COUNT 125          // How many NeoPixels are attached to the Arduino?
-#define RED     0x00FF0000
-#define GREEN   0x0000FF00
-#define BLUE    0x000000FF
-#define WHITE   0x00FFFFFF
+// LEDs
+#define LED_COUNT         125         // How many NeoPixels are attached to the Arduino?
+#define RED               0x00FF0000
+#define GREEN             0x0000FF00
+#define BLUE              0x000000FF
+#define WHITE             0x00FFFFFF
+#define MIN_BRIGHTNESS    10          // Min LED brightness for dark environments
+#define MAX_BRIGHTNESS    200         // Max LED brightness for well lit environments
+
 
 //////////////////////
 // Global variables //
 //////////////////////
+static float BRIGHTNESS_GAIN = (float)(MAX_BRIGHTNESS - MIN_BRIGHTNESS)/100;
+static float BRIGHTNESS_OFFSET = MIN_BRIGHTNESS;
 Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 enum states {S_TIME, S_TEMPERATURE, S_SET_HOUR, S_SET_MINUTE};
 enum buttonStates {RELEASED, PRESSED};
@@ -46,7 +55,7 @@ uint8_t menuTimer = 0;
 bool shortPressEvent = FALSE;
 DateTime now; // Uninitialized :( 
 unsigned long refreshTime = REFRESH_TIME_STD; // How often to refresh while in time mode.
-uint8_t hour, minutes, temperature, minutes_range, dots = 0;
+uint8_t hour, hour_to_display, minutes, temperature, minutes_range, dots = 0;
 
 #ifdef _ENABLE_DS3231_
 RTC_DS3231 rtc;
@@ -70,6 +79,10 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(buttonPin), button_ISR, CHANGE);
   #endif // _ENABLE_INTERRUPTS_
 
+  // Ambient light sensor
+  analogReference(EXTERNAL);
+  pinMode(LIGHT_SENSOR_PIN, INPUT);
+
   #ifdef _ENABLE_DS3231_
   if (! rtc.begin()) {
     Serial.println("Couldn't find RTC");
@@ -83,53 +96,54 @@ void setup() {
   #endif // _ENABLE_DS3231_
 
   #ifdef _ENABLE_LEDS_
-  strip.begin();           // INITIALIZE NeoPixel strip object (REQUIRED)
+  strip.begin();             // INITIALIZE NeoPixel strip object (REQUIRED)
   strip.setBrightness(255);  // Set BRIGHTNESS (max = 255)
   #endif // _ENABLE_LEDS_
 }
 
 
 void loop() {
-
-  /////////////////////////
-  // TODO: LED INTENSITY //
-  /////////////////////////
+  int16_t ambient_light = 0;
+  float brightness = 0.0;
   
   strip.clear();
-  // #define _SINGLE_LED_ONLY_
-  #ifdef _SINGLE_LED_ONLY_
-  strip.setPixelColor(0, WHITE);
-  strip.show();
-  delay(5000);
-  strip.clear();
-  // strip.setPixelColor(1, WHITE);
-  strip.fill(WHITE,0,LED_COUNT); // Turn on all leds.
-  strip.show();
-  delay(4000);
-  #endif // _SINGLE_LED_ONLY_
-
   refreshTime = REFRESH_TIME_STD;
-  #ifndef _SINGLE_LED_ONLY_
+  
   switch (operatingMode){
     case S_TIME:
+      // Set LED brightness based on ambient light
+      ambient_light = getAmbientLight();
+      brightness = (float) (ambient_light * BRIGHTNESS_GAIN + BRIGHTNESS_OFFSET);
+      Serial.print("Ambient light [%]: ");
+      Serial.println(ambient_light);
+      Serial.print("Brigthness: ");
+      Serial.println(brightness);
+      strip.setBrightness((uint8_t)brightness);
+
       now = rtc.now(); // Get time
       hour = (now.hour()>12 ? (now.hour()-12) : (now.hour())); // Convert 24-h format into 12-h format
       Serial.print("Time mode: ");
       Serial.print(hour, DEC);
       Serial.print(':');
       Serial.println(now.minute(), DEC);
+
       // Set hours
-      if (hour != 1){
-        updateFrame(HOURS[0], sizeof(HOURS[0]), NO_ROW, WHITE); // Unless it is 1 print "Sono le ore"
+      hour_to_display = hour;
+      if (now.minute() > 39){ 
+        hour_to_display = hour + 1;   // Past hour:39 we should print hour+1 "meno venti", "meno un quarto" and so on...
+        if (hour_to_display > 12){ hour_to_display = 1; }
       }
-      updateFrame(HOURS[hour], sizeof(HOURS[hour]), NO_ROW, WHITE);
+      if (hour_to_display == 0){ hour_to_display = 12; }             // Midnight is 0 but should display string #12
+      if (hour_to_display != 1){ updateFrame(HOURS[0], sizeof(HOURS[0]), NO_ROW, WHITE); } // Unless it is 1 print "Sono le ore"
+      updateFrame(HOURS[hour_to_display], sizeof(HOURS[hour_to_display]), NO_ROW, WHITE);
+      
       // Set minutes (words)
       minutes_range = (uint8_t)floor(now.minute()/5);
       updateFrame(MINUTES[minutes_range], sizeof(MINUTES[minutes_range]), NO_ROW, WHITE);
+      
       // Set minutes (dots)
       dots = now.minute() - minutes_range * 5;
       updateFrame(DOTS[dots], sizeof(DOTS[dots]), NO_ROW, WHITE);
-
       break;
 
     case S_TEMPERATURE:
@@ -187,7 +201,6 @@ void loop() {
     default:
       break;
   }
-  #endif // _SINGLE_LED_ONLY_
   
   strip.show();
   delay(refreshTime);
@@ -215,7 +228,6 @@ void button_ISR() {
         operatingMode = S_SET_HOUR;
         menuTimer = 0;
       }
-      Serial.println(operatingMode);
     } else {
     // SHORT PRESS
       Serial.println("Short press.");
@@ -225,9 +237,15 @@ void button_ISR() {
       } else {
         shortPressEvent = TRUE;
       }
-      Serial.println(operatingMode);
     }
   }
   return;
 }
 #endif // _ENABLE_INTERRUPTS
+
+
+int16_t getAmbientLight()
+{
+  // ADC reading from ambient light goes almost from 0 to full scale (1023) which can easily be converted into a percentage dividing by 10.
+  return(analogRead(LIGHT_SENSOR_PIN)/10);
+}
